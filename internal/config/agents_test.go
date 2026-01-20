@@ -11,7 +11,7 @@ import (
 func TestBuiltinPresets(t *testing.T) {
 	t.Parallel()
 	// Ensure all built-in presets are accessible
-	presets := []AgentPreset{AgentClaude, AgentGemini, AgentCodex, AgentCursor, AgentAuggie, AgentAmp}
+	presets := []AgentPreset{AgentClaude, AgentGemini, AgentCodex, AgentCursor, AgentAuggie, AgentAmp, AgentDevin}
 
 	for _, preset := range presets {
 		info := GetAgentPreset(preset)
@@ -44,6 +44,7 @@ func TestGetAgentPresetByName(t *testing.T) {
 		{"cursor", AgentCursor, false},
 		{"auggie", AgentAuggie, false},
 		{"amp", AgentAmp, false},
+		{"devin", AgentDevin, false},
 		{"aider", "", true},    // Not built-in, can be added via config
 		{"opencode", "", true}, // Not built-in, can be added via config
 		{"unknown", "", true},
@@ -77,6 +78,7 @@ func TestRuntimeConfigFromPreset(t *testing.T) {
 		{AgentCursor, "cursor-agent"},
 		{AgentAuggie, "auggie"},
 		{AgentAmp, "amp"},
+		{AgentDevin, "gt"},
 	}
 
 	for _, tt := range tests {
@@ -102,6 +104,7 @@ func TestIsKnownPreset(t *testing.T) {
 		{"cursor", true},
 		{"auggie", true},
 		{"amp", true},
+		{"devin", true},
 		{"aider", false},    // Not built-in, can be added via config
 		{"opencode", false}, // Not built-in, can be added via config
 		{"unknown", false},
@@ -315,6 +318,7 @@ func TestSupportsSessionResume(t *testing.T) {
 		{"cursor", true},
 		{"auggie", true},
 		{"amp", true},
+		{"devin", false}, // Devin uses API-based sessions, not CLI resume
 		{"unknown", false},
 	}
 
@@ -339,6 +343,7 @@ func TestGetSessionIDEnvVar(t *testing.T) {
 		{"cursor", ""},   // Cursor uses --resume with chatId directly
 		{"auggie", ""},   // Auggie uses --resume directly
 		{"amp", ""},      // AMP uses 'threads continue' subcommand
+		{"devin", "DEVIN_SESSION_ID"}, // Devin uses API-based sessions
 		{"unknown", ""},
 	}
 
@@ -363,6 +368,7 @@ func TestGetProcessNames(t *testing.T) {
 		{"cursor", []string{"cursor-agent"}},
 		{"auggie", []string{"auggie"}},
 		{"amp", []string{"amp"}},
+		{"devin", []string{"gt"}}, // Devin runs via gt devin-agent wrapper
 		{"unknown", []string{"node"}}, // Falls back to Claude's process
 	}
 
@@ -385,7 +391,7 @@ func TestGetProcessNames(t *testing.T) {
 func TestListAgentPresetsMatchesConstants(t *testing.T) {
 	t.Parallel()
 	// Ensure all AgentPreset constants are returned by ListAgentPresets
-	allConstants := []AgentPreset{AgentClaude, AgentGemini, AgentCodex, AgentCursor, AgentAuggie, AgentAmp}
+	allConstants := []AgentPreset{AgentClaude, AgentGemini, AgentCodex, AgentCursor, AgentAuggie, AgentAmp, AgentDevin}
 	presets := ListAgentPresets()
 
 	// Convert to map for quick lookup
@@ -446,6 +452,11 @@ func TestAgentCommandGeneration(t *testing.T) {
 			preset:       AgentAmp,
 			wantCommand:  "amp",
 			wantContains: []string{"--dangerously-allow-all", "--no-ide"},
+		},
+		{
+			preset:       AgentDevin,
+			wantCommand:  "gt",
+			wantContains: []string{"devin-agent"},
 		},
 	}
 
@@ -628,4 +639,52 @@ func TestLoadRigAgentRegistry(t *testing.T) {
 			t.Errorf("LoadRigAgentRegistry(%s) should error for invalid JSON: got nil", invalidRegistryPath)
 		}
 	})
+}
+
+func TestDevinAgentPreset(t *testing.T) {
+	t.Parallel()
+	// Verify devin agent preset is correctly configured
+	info := GetAgentPreset(AgentDevin)
+	if info == nil {
+		t.Fatal("devin preset not found")
+	}
+
+	// Check command - Devin uses gt as the wrapper command
+	if info.Command != "gt" {
+		t.Errorf("devin command = %q, want gt", info.Command)
+	}
+
+	// Check args include devin-agent subcommand
+	hasDevinAgent := false
+	for _, arg := range info.Args {
+		if arg == "devin-agent" {
+			hasDevinAgent = true
+		}
+	}
+	if !hasDevinAgent {
+		t.Error("devin args missing devin-agent subcommand")
+	}
+
+	// Check ProcessNames for detection
+	if len(info.ProcessNames) == 0 {
+		t.Error("devin ProcessNames is empty")
+	}
+	if info.ProcessNames[0] != "gt" {
+		t.Errorf("devin ProcessNames[0] = %q, want gt", info.ProcessNames[0])
+	}
+
+	// Devin is API-based, so it doesn't support CLI resume
+	if info.ResumeFlag != "" {
+		t.Errorf("devin ResumeFlag = %q, want empty (API-based)", info.ResumeFlag)
+	}
+
+	// Check session ID env var
+	if info.SessionIDEnv != "DEVIN_SESSION_ID" {
+		t.Errorf("devin SessionIDEnv = %q, want DEVIN_SESSION_ID", info.SessionIDEnv)
+	}
+
+	// Devin doesn't support hooks (API-based)
+	if info.SupportsHooks {
+		t.Error("devin SupportsHooks should be false (API-based)")
+	}
 }

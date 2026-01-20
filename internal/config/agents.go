@@ -27,6 +27,8 @@ const (
 	AgentAuggie AgentPreset = "auggie"
 	// AgentAmp is Sourcegraph AMP.
 	AgentAmp AgentPreset = "amp"
+	// AgentDevin is Devin AI (API-based).
+	AgentDevin AgentPreset = "devin"
 )
 
 // AgentPresetInfo contains the configuration details for an agent preset.
@@ -175,6 +177,17 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 		ResumeFlag:          "threads continue",
 		ResumeStyle:         "subcommand", // 'amp threads continue <threadId>'
 		SupportsHooks:       false,
+		SupportsForkSession: false,
+	},
+	AgentDevin: {
+		Name:                AgentDevin,
+		Command:             "gt",
+		Args:                []string{"devin-agent"},
+		ProcessNames:        []string{"gt"},
+		SessionIDEnv:        "DEVIN_SESSION_ID",
+		ResumeFlag:          "",    // Devin uses API-based sessions, not CLI resume
+		ResumeStyle:         "",    // Not applicable for API-based agent
+		SupportsHooks:       false, // API-based, doesn't use local hooks
 		SupportsForkSession: false,
 	},
 }
