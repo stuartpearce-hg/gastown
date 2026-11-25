@@ -393,6 +393,8 @@ Features:
 - Hook state visualization
 - Configuration management
 
+When run outside a workspace, `gt dashboard` starts in setup mode. Setup mode listens on `127.0.0.1` only, and its API requires the per-process token embedded in the setup page. Rig URLs added from the setup page must be `https://`, `ssh://` or `user@host:path` remotes.
+
 ## Advanced Concepts
 
 ### The Propulsion Principle

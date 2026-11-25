@@ -513,6 +513,8 @@ gt rig list
 gt rig remove <name>
 ```
 
+`gt rig add` rejects remote-helper URLs such as `ext::...` and `fd::...`, URLs starting with `-`, and schemes other than `https`, `http`, `ssh`, `git` and `file`. Clones run with `GIT_ALLOW_PROTOCOL=https:http:ssh:git:file`.
+
 ### Convoy Management (Primary Dashboard)
 
 ```bash

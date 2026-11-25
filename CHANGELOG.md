@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Setup-mode dashboard hardening** - `gt dashboard` setup mode now binds to `127.0.0.1`, requires a per-process token on `/api/*`, drops wildcard CORS, and only accepts https/ssh/scp-style rig URLs
+- **Safe git clone URLs** - Clone helpers reject `<transport>::` URLs (e.g. `ext::`), leading-dash URLs and unknown schemes, pass URLs after `--`, and set `GIT_ALLOW_PROTOCOL`
+
 ## [0.5.0] - 2026-01-22
 
 ### Added
