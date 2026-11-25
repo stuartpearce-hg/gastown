@@ -2,9 +2,11 @@ package cmd
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -46,9 +48,12 @@ func runDashboard(cmd *cobra.Command, args []string) error {
 	// Check if we're in a workspace - if not, run in setup mode
 	var handler http.Handler
 	var err error
+	listenHost := ""
 
 	if _, wsErr := workspace.FindFromCwdOrError(); wsErr != nil {
-		// No workspace - run in setup mode
+		// No workspace - run in setup mode. Setup endpoints create workspaces
+		// and clone repositories, so only listen on loopback.
+		listenHost = "127.0.0.1"
 		handler, err = web.NewSetupMux()
 		if err != nil {
 			return fmt.Errorf("creating setup handler: %w", err)
@@ -80,7 +85,7 @@ func runDashboard(cmd *cobra.Command, args []string) error {
 	fmt.Printf("   Press Ctrl+C to stop\n")
 
 	server := &http.Server{
-		Addr:              fmt.Sprintf(":%d", dashboardPort),
+		Addr:              net.JoinHostPort(listenHost, strconv.Itoa(dashboardPort)),
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,

@@ -3,46 +3,67 @@ package web
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/git"
+)
+
+const (
+	// setupTokenHeader carries the per-process setup token on API requests.
+	setupTokenHeader = "X-Gastown-Setup-Token" //nolint:gosec // G101: header name, not a credential
+	// setupTokenPlaceholder is replaced with the setup token when serving setupHTML.
+	setupTokenPlaceholder = "{{GT_SETUP_TOKEN}}" //nolint:gosec // G101: template placeholder, not a credential
+)
+
+var (
+	setupRigNamePattern = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+	scpLikeURLPattern   = regexp.MustCompile(`^[A-Za-z0-9._~-]+@[A-Za-z0-9.-]+:[^-/\s][^\s]*$`)
 )
 
 // SetupHandler handles the setup flow when no workspace exists.
-type SetupHandler struct{}
+type SetupHandler struct {
+	token string
+}
 
-// NewSetupHandler creates a new setup handler.
-func NewSetupHandler() *SetupHandler {
-	return &SetupHandler{}
+// NewSetupHandler creates a new setup handler that embeds token in the page.
+func NewSetupHandler(token string) *SetupHandler {
+	return &SetupHandler{token: token}
 }
 
 // ServeHTTP renders the setup page.
 func (h *SetupHandler) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(setupHTML))
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write([]byte(strings.Replace(setupHTML, setupTokenPlaceholder, h.token, 1)))
 }
 
 // SetupAPIHandler handles API requests for setup operations.
-type SetupAPIHandler struct{}
+type SetupAPIHandler struct {
+	token string
+}
 
-// NewSetupAPIHandler creates a new setup API handler.
-func NewSetupAPIHandler() *SetupAPIHandler {
-	return &SetupAPIHandler{}
+// NewSetupAPIHandler creates a setup API handler that requires token on every request.
+func NewSetupAPIHandler(token string) *SetupAPIHandler {
+	return &SetupAPIHandler{token: token}
 }
 
 // ServeHTTP routes setup API requests.
 func (h *SetupAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusOK)
+	if h.token == "" || subtle.ConstantTimeCompare([]byte(r.Header.Get(setupTokenHeader)), []byte(h.token)) != 1 {
+		h.sendError(w, "Forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -123,13 +144,14 @@ func (h *SetupAPIHandler) handleInstall(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Build gt install command
-	args := []string{"install", req.Path}
+	args := []string{"install"}
 	if req.Name != "" {
-		args = append(args, "--name", req.Name)
+		args = append(args, "--name="+req.Name)
 	}
 	if req.Git {
 		args = append(args, "--git")
 	}
+	args = append(args, "--", req.Path)
 
 	output, err := h.runGtCommand(r.Context(), 60*time.Second, args)
 	if err != nil {
@@ -160,7 +182,17 @@ func (h *SetupAPIHandler) handleRigAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	args := []string{"rig", "add", req.Name, req.GitURL}
+	if !setupRigNamePattern.MatchString(req.Name) {
+		h.sendError(w, "Rig name may only contain letters, digits, and underscores", http.StatusBadRequest)
+		return
+	}
+
+	if err := validateSetupGitURL(req.GitURL); err != nil {
+		h.sendError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	args := []string{"rig", "add", "--", req.Name, req.GitURL}
 
 	output, err := h.runGtCommand(r.Context(), 120*time.Second, args)
 	if err != nil {
@@ -361,16 +393,62 @@ func (h *SetupAPIHandler) sendJSON(w http.ResponseWriter, resp SetupResponse) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+// validateSetupGitURL restricts setup-mode rig URLs to remote https, ssh, and
+// scp-like (user@host:path) repositories. Local paths and other transports are
+// rejected because the setup API must not clone arbitrary host content.
+func validateSetupGitURL(raw string) error {
+	if err := git.ValidateCloneURL(raw); err != nil {
+		return err
+	}
+	if scpLikeURLPattern.MatchString(raw) {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "ssh") || u.Hostname() == "" || strings.HasPrefix(u.Hostname(), "-") {
+		return fmt.Errorf("gitUrl must be an https://, ssh://, or user@host:path repository URL")
+	}
+	return nil
+}
+
+// isLoopbackHost reports whether host (optionally with port) names the local machine.
+func isLoopbackHost(host string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// localOnly rejects requests that do not come from, and address, the local
+// machine. The Host check blocks DNS-rebinding pages from reading the token.
+func localOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isLoopbackHost(r.RemoteAddr) || !isLoopbackHost(r.Host) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // NewSetupMux creates the HTTP handler for setup mode.
 func NewSetupMux() (http.Handler, error) {
-	setupHandler := NewSetupHandler()
-	apiHandler := NewSetupAPIHandler()
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return nil, fmt.Errorf("generating setup token: %w", err)
+	}
+	return newSetupMuxWithToken(hex.EncodeToString(buf)), nil
+}
 
+func newSetupMuxWithToken(token string) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("/api/", apiHandler)
-	mux.Handle("/", setupHandler)
-
-	return mux, nil
+	mux.Handle("/api/", NewSetupAPIHandler(token))
+	mux.Handle("/", NewSetupHandler(token))
+	return localOnly(mux)
 }
 
 const setupHTML = `<!DOCTYPE html>
@@ -379,6 +457,7 @@ const setupHTML = `<!DOCTYPE html>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Gas Town Setup</title>
+    <meta name="gt-setup-token" content="{{GT_SETUP_TOKEN}}">
     <style>
         :root {
             --bg-dark: #0d1117;
@@ -756,6 +835,13 @@ const setupHTML = `<!DOCTYPE html>
     <script>
         var workspacePath = '';
 
+        function setupHeaders() {
+            return {
+                'Content-Type': 'application/json',
+                'X-Gastown-Setup-Token': document.querySelector('meta[name="gt-setup-token"]').content
+            };
+        }
+
         function showMode(mode) {
             document.getElementById('tab-existing').className = mode === 'existing' ? 'mode-tab active' : 'mode-tab';
             document.getElementById('tab-create').className = mode === 'create' ? 'mode-tab active' : 'mode-tab';
@@ -781,7 +867,7 @@ const setupHTML = `<!DOCTYPE html>
 
             fetch('/api/check-workspace', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: setupHeaders(),
                 body: JSON.stringify({ path: path })
             })
             .then(function(r) { return r.json(); })
@@ -825,7 +911,7 @@ const setupHTML = `<!DOCTYPE html>
 
             fetch('/api/launch', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: setupHeaders(),
                 body: JSON.stringify({ path: path, port: 8080 })
             })
             .then(function(r) { return r.json(); })
@@ -879,7 +965,7 @@ const setupHTML = `<!DOCTYPE html>
 
             fetch('/api/install', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: setupHeaders(),
                 body: JSON.stringify({ path: path, name: name, git: git })
             })
             .then(function(r) { return r.json(); })
@@ -925,7 +1011,7 @@ const setupHTML = `<!DOCTYPE html>
 
             fetch('/api/rig/add', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: setupHeaders(),
                 body: JSON.stringify({ name: name, gitUrl: url })
             })
             .then(function(r) { return r.json(); })

@@ -767,3 +767,18 @@ func TestConvertToSSH(t *testing.T) {
 		})
 	}
 }
+
+func TestAddRig_RejectsUnsafeGitURL(t *testing.T) {
+	root, rigsConfig := setupTestTown(t)
+	manager := NewManager(root, rigsConfig, git.NewGit(root))
+
+	for _, url := range []string{"ext::sh -c id", "--upload-pack=id"} {
+		_, err := manager.AddRig(AddRigOptions{Name: "unsafe", GitURL: url})
+		if err == nil || !strings.Contains(err.Error(), "invalid repository URL") {
+			t.Errorf("AddRig(GitURL=%q) error = %v, want invalid repository URL", url, err)
+		}
+		if _, statErr := os.Stat(filepath.Join(root, "unsafe")); statErr == nil {
+			t.Errorf("AddRig(GitURL=%q) created rig directory before rejecting URL", url)
+		}
+	}
+}

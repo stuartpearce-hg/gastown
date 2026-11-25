@@ -543,3 +543,80 @@ func stringContains(s, substr string) bool {
 	}
 	return false
 }
+
+func TestValidateCloneURL(t *testing.T) {
+	valid := []string{
+		"https://github.com/owner/repo.git",
+		"http://example.com/repo.git",
+		"ssh://git@github.com/owner/repo.git",
+		"git://example.com/repo.git",
+		"file:///srv/repos/repo.git",
+		"git@github.com:owner/repo.git",
+		"/abs/path/to/repo",
+		"./relative/repo",
+	}
+	for _, u := range valid {
+		if err := ValidateCloneURL(u); err != nil {
+			t.Errorf("ValidateCloneURL(%q) = %v, want nil", u, err)
+		}
+	}
+
+	invalid := []string{
+		"",
+		"ext::sh -c touch% /tmp/pwned",
+		"EXT::sh -c id",
+		"fd::17",
+		"transport::address",
+		"--upload-pack=touch /tmp/pwned",
+		"-uhello",
+		"gopher://example.com/repo",
+		"https://example.com/repo\n--upload-pack=id",
+	}
+	for _, u := range invalid {
+		if err := ValidateCloneURL(u); err == nil {
+			t.Errorf("ValidateCloneURL(%q) = nil, want error", u)
+		}
+	}
+}
+
+func TestCloneRejectsExtTransport(t *testing.T) {
+	src := initTestRepo(t)
+	g := NewGit(t.TempDir())
+
+	clones := map[string]func(url, dest string) error{
+		"Clone":     g.Clone,
+		"CloneBare": g.CloneBare,
+		"CloneWithReference": func(url, dest string) error {
+			return g.CloneWithReference(url, dest, src)
+		},
+		"CloneBareWithReference": func(url, dest string) error {
+			return g.CloneBareWithReference(url, dest, src)
+		},
+	}
+
+	for name, clone := range clones {
+		t.Run(name, func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "pwned")
+			url := "ext::sh -c touch% " + marker
+			dest := filepath.Join(t.TempDir(), "dst")
+			if err := clone(url, dest); err == nil {
+				t.Fatalf("%s(%q) succeeded, want error", name, url)
+			}
+			if _, err := os.Stat(marker); err == nil {
+				t.Fatalf("%s executed ext:: transport command", name)
+			}
+		})
+	}
+}
+
+func TestCloneEnvDisallowsExtTransport(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "pwned")
+	tmpDir := t.TempDir()
+	cmd := exec.Command("git", "-c", "protocol.ext.allow=always", "clone", "--", "ext::sh -c touch% "+marker, filepath.Join(tmpDir, "dst"))
+	cmd.Dir = tmpDir
+	cmd.Env = cloneEnv(tmpDir)
+	_ = cmd.Run()
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("cloneEnv allowed ext:: transport to execute a command")
+	}
+}

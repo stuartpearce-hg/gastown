@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -133,8 +134,53 @@ func (g *Git) wrapError(err error, stdout, stderr string, args []string) error {
 	}
 }
 
+// cloneAllowedProtocols restricts which transports git may use during a clone.
+// Remote-helper transports such as ext:: (which runs arbitrary commands) and
+// fd:: are excluded regardless of the user's protocol.*.allow configuration.
+const cloneAllowedProtocols = "https:http:ssh:git:file"
+
+var (
+	remoteHelperURLPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*::`)
+	schemeURLPattern       = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9+.-]*)://`)
+	allowedCloneSchemes    = map[string]bool{"https": true, "http": true, "ssh": true, "git": true, "file": true}
+)
+
+// ValidateCloneURL rejects repository URLs that could make git execute
+// commands or parse the URL as an option: remote-helper syntax
+// (<transport>::<address>, e.g. ext::), leading dashes, control characters,
+// and schemes outside https, http, ssh, git and file.
+func ValidateCloneURL(url string) error {
+	if url == "" {
+		return fmt.Errorf("repository URL is required")
+	}
+	if strings.HasPrefix(url, "-") {
+		return fmt.Errorf("invalid repository URL %q: must not start with '-'", url)
+	}
+	if strings.ContainsFunc(url, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return fmt.Errorf("invalid repository URL %q: contains control characters", url)
+	}
+	if remoteHelperURLPattern.MatchString(url) {
+		return fmt.Errorf("invalid repository URL %q: remote-helper transports (<transport>::) are not allowed", url)
+	}
+	if m := schemeURLPattern.FindStringSubmatch(url); m != nil && !allowedCloneSchemes[strings.ToLower(m[1])] {
+		return fmt.Errorf("invalid repository URL %q: scheme %q is not allowed", url, m[1])
+	}
+	return nil
+}
+
+// cloneEnv returns the environment for clone subprocesses run in tmpDir.
+func cloneEnv(tmpDir string) []string {
+	return append(os.Environ(),
+		"GIT_CEILING_DIRECTORIES="+tmpDir,
+		"GIT_ALLOW_PROTOCOL="+cloneAllowedProtocols,
+	)
+}
+
 // Clone clones a repository to the destination.
 func (g *Git) Clone(url, dest string) error {
+	if err := ValidateCloneURL(url); err != nil {
+		return err
+	}
 	// Ensure destination directory's parent exists
 	destParent := filepath.Dir(dest)
 	if err := os.MkdirAll(destParent, 0755); err != nil {
@@ -149,9 +195,9 @@ func (g *Git) Clone(url, dest string) error {
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	tmpDest := filepath.Join(tmpDir, filepath.Base(dest))
-	cmd := exec.Command("git", "clone", url, tmpDest)
+	cmd := exec.Command("git", "clone", "--", url, tmpDest)
 	cmd.Dir = tmpDir
-	cmd.Env = append(os.Environ(), "GIT_CEILING_DIRECTORIES="+tmpDir)
+	cmd.Env = cloneEnv(tmpDir)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -175,6 +221,9 @@ func (g *Git) Clone(url, dest string) error {
 // CloneWithReference clones a repository using a local repo as an object reference.
 // This saves disk by sharing objects without changing remotes.
 func (g *Git) CloneWithReference(url, dest, reference string) error {
+	if err := ValidateCloneURL(url); err != nil {
+		return err
+	}
 	// Ensure destination directory's parent exists
 	destParent := filepath.Dir(dest)
 	if err := os.MkdirAll(destParent, 0755); err != nil {
@@ -189,9 +238,9 @@ func (g *Git) CloneWithReference(url, dest, reference string) error {
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	tmpDest := filepath.Join(tmpDir, filepath.Base(dest))
-	cmd := exec.Command("git", "clone", "--reference-if-able", reference, url, tmpDest)
+	cmd := exec.Command("git", "clone", "--reference-if-able", reference, "--", url, tmpDest)
 	cmd.Dir = tmpDir
-	cmd.Env = append(os.Environ(), "GIT_CEILING_DIRECTORIES="+tmpDir)
+	cmd.Env = cloneEnv(tmpDir)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -215,6 +264,9 @@ func (g *Git) CloneWithReference(url, dest, reference string) error {
 // CloneBare clones a repository as a bare repo (no working directory).
 // This is used for the shared repo architecture where all worktrees share a single git database.
 func (g *Git) CloneBare(url, dest string) error {
+	if err := ValidateCloneURL(url); err != nil {
+		return err
+	}
 	// Ensure destination directory's parent exists
 	destParent := filepath.Dir(dest)
 	if err := os.MkdirAll(destParent, 0755); err != nil {
@@ -229,9 +281,9 @@ func (g *Git) CloneBare(url, dest string) error {
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	tmpDest := filepath.Join(tmpDir, filepath.Base(dest))
-	cmd := exec.Command("git", "clone", "--bare", url, tmpDest)
+	cmd := exec.Command("git", "clone", "--bare", "--", url, tmpDest)
 	cmd.Dir = tmpDir
-	cmd.Env = append(os.Environ(), "GIT_CEILING_DIRECTORIES="+tmpDir)
+	cmd.Env = cloneEnv(tmpDir)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -297,6 +349,9 @@ func configureRefspec(repoPath string) error {
 
 // CloneBareWithReference clones a bare repository using a local repo as an object reference.
 func (g *Git) CloneBareWithReference(url, dest, reference string) error {
+	if err := ValidateCloneURL(url); err != nil {
+		return err
+	}
 	// Ensure destination directory's parent exists
 	destParent := filepath.Dir(dest)
 	if err := os.MkdirAll(destParent, 0755); err != nil {
@@ -311,9 +366,9 @@ func (g *Git) CloneBareWithReference(url, dest, reference string) error {
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	tmpDest := filepath.Join(tmpDir, filepath.Base(dest))
-	cmd := exec.Command("git", "clone", "--bare", "--reference-if-able", reference, url, tmpDest)
+	cmd := exec.Command("git", "clone", "--bare", "--reference-if-able", reference, "--", url, tmpDest)
 	cmd.Dir = tmpDir
-	cmd.Env = append(os.Environ(), "GIT_CEILING_DIRECTORIES="+tmpDir)
+	cmd.Env = cloneEnv(tmpDir)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
